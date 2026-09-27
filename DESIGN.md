@@ -1,35 +1,77 @@
-# Nesting design: cut for total cost, not yield
+# Cut, keep, or scrap
 
-## Summary
+**A design for deciding where every part comes from, and what the metal left behind is really worth.**
 
-- **Objective:** lowest total cost — metal bought, a setup for every piece of stock loaded, cutting time, adjusted for the value of drops used and offcuts kept. Not yield.
-- **Offcut value:** what we expect to save by reusing it, minus the cost of keeping it, estimated from a year of orders. The smallest offcut worth keeping runs from 12″ square (1″ 7075) to 35″ square (1/8″ 6061). Nothing in 3/4″ 7075 is worth keeping at all.
-- **Method:** plan each alloy and thickness separately. A quick greedy pass, then a wider search over two-stage guillotine patterns, then an integer program picks the cheapest combination.
-- **Sample batch:** $15,934, against $16,339 for a yield objective and $16,606 for the quick pass alone.
-- **A year replayed:** 158 plates and 12.9% scrap, against 161 plates and 15.4% scrap for the quick pass alone — about $2,500 less cash.
-- **Ship first:** the planner, a monthly offcut-value table, and a log of what happens to every drop.
+The obvious goal for a cutting shop is to waste as little metal as possible. That turns out to be the wrong goal. It ignores what it costs to put a piece of metal on the saw, and it cannot tell a leftover a future order will use from a sliver of scrap.
+
+This document works out what to optimise instead — **total cost, with a price on every leftover** — and shows what that changes about how the batch gets cut.
+
+Terms: a **leftover** is what the brief calls a *drop*, a piece from an earlier job sitting on the rack. A **plate** is fresh metal we buy.
+
+> **Where the brief's five questions are answered:** the objective and the uncertainty in leftover value — §3 and §4. Assumptions — §1.2. The approach, how it scales and where it breaks — §4. Evaluation and baselines — §6. First version vs ambitious version — §7.
 
 ---
 
-## 1. The objective
+## 1. The problem
 
-### 1.1 What a plan costs
+### 1.1 What we decide
 
-```
-plan cost =  plates bought × plate price
-           + pieces of stock loaded × setup      (plates and drops alike)
-           + cuts × cut cost                     (slower when thicker, and for 7075)
-           + value of drops used
-           − value of offcuts kept
-```
+Customers order rectangles in a given metal and thickness. We cut them with a saw from either a fresh plate, bought by weight, or a leftover on the rack. For every part we decide three things:
 
-- **Only the first three lines are cash.** The last two move value between batches: an offcut is credited when kept and charged at the same value when a later batch uses it. A drop is never free metal, and keeping one is never money in the bank.
-- **The value is an expected saving, not the metal's price.** It already allows for the chance the offcut is never used. On this batch the credit is 30% of the metal inside those pieces.
-- **Packing and leftovers are one decision,** so one objective covers both. Part revenue is identical across plans that ship on time, so it drops out.
+- **which piece of metal** it comes from,
+- **where on it** the part sits,
+- **which way round** it faces.
 
-### 1.2 Why not yield
+A part can only be cut from the same alloy and thickness, so the batch splits into independent problems — eight of them in the sample, from 10 orders and 86 parts.
 
-Six 18 × 58″ parts, 1″ 6061, on a 60 × 120″ plate. Same metal used, so identical yield:
+### 1.2 What drives the cost, and what I assumed
+
+| | Assumed | Where it comes from |
+|---|---|---|
+| Metal | $4.20/lb for 6061, $7.50/lb for 7075 | **The data** |
+| Loading a piece of stock | 20 minutes | Brief's range, my pick |
+| Machine + labour | $80/hr — so one load is about **$27** | Brief's range, my pick |
+| Cutting | ~1 min per cut, slower when thicker and for 7075 | The brief |
+| Saw blade | 1/8″ of metal lost per cut | Brief's range, my pick |
+| Cuts | Edge to edge only; parts may turn 90° | The brief |
+| Keeping a leftover | $7 to tag and rack, plus $0.25/sq ft per month | **My assumption** |
+| Leftovers | Reused for our own orders or scrapped, never sold | The brief |
+| Combining orders | All orders on hand are cut together; parts due later are held | The brief gives `jobs.json` as the batch to nest now |
+
+No questions were needed — every open point has a defensible default, and changing one changes the numbers, not the approach. Two notes:
+
+- **All 10 orders are cut together** even though their due dates span 16 days. Cutting a later order early is low risk: the parts wait on a shelf and still ship on time.
+- **A 2-day hold, for live use only, not in the cost numbers.** In real operation a cut that would leave a new plate mostly empty could wait up to two days for a matching order. That only pays if one actually arrives: in the history another order of the same metal followed within two days 34% of the time for 1/4″ 6061 and 33% for 1/2″ 6061, but 13% for 1/8″ and rarely or never for thick or 7075. So the rule would be — hold only for metals above roughly 30%, and only below some plate-fullness threshold. That threshold needs the replay in §6 and is untuned.
+
+**Three shop realities I do not model,** each of which would tighten the answer: fresh plate probably needs a trim cut on its mill edge; *locating* a particular leftover on the rack may cost more than loading it; and 7075 leftovers carry heat and lot numbers, so traceability may limit which orders can use them.
+
+### 1.3 What the data says
+
+**This batch is mostly partial plates.** Six of the eight metal groups do not fill even one plate. So the decisions that matter are not about packing full plates tightly — they are about which stock to use and what shape is left behind.
+
+**A year of past orders tells us which leftovers get reused.** Three things stand out:
+
+- **Thin 6061 dominates.** 1/4″ was ordered 73 times, 1/2″ 66 times, 1/8″ 63. Thick metal barely moves: 1″ twelve times, 3/4″ six. 6061 is about 80% of all orders.
+- **Exact sizes almost never repeat.** 167 of the 189 distinct sizes were ordered only once. So the question is never "will this size come back" — it is "will a future part *fit inside* this piece".
+- **Some metal has no demand at all.** 3/4″ 7075 was never ordered in the whole year.
+
+---
+
+## 2. My first idea, and where it breaks
+
+The natural plan, and the one I started with:
+
+1. **Fill whole plates** as tightly as possible.
+2. **Cut the remaining parts from leftovers** on the rack.
+3. **Cut whatever is still left from a new plate,** pushing the parts to one end so the remainder stays as one big piece.
+
+Judged by **yield** — the share of the plate that ends up as parts. More is better.
+
+The packing rule here is sound, and it survives into the final method. What breaks is the *scoring*.
+
+### Same yield, different leftovers
+
+Six 18 × 58″ parts, 1″ 6061, on a 60 × 120″ plate. Both use the same metal, so yield scores them identically:
 
 ```
 A · strips across the 60″ side        B · one strip across the 120″ side
@@ -43,77 +85,102 @@ A · strips across the 60″ side        B · one strip across the 120″ side
         kept: $32                                    kept: $97
 ```
 
-B costs $69 less and yield cannot tell them apart. Yield also ignores setup: on this batch it loads 8 drops against the final plan's 5, some costing more to load than the metal they save.
+**B is $69 cheaper, and yield cannot tell them apart.** One leaves two thin strips; the other leaves a clean piece a future order can use.
 
-### 1.3 What an offcut is worth
+### It also ignores loading
 
-```
-V = P(used within 12 months) × average saving per use − handling − storage
-saving per use = metal it replaces − setup to load it − trim cuts
-```
-
-- **Chance of use:** count past orders of the same stock that would fit inside it, either orientation, kerf included, keeping only those where reuse actually saves money. Assume it wins half of them, since other drops and open plates compete.
-- **"Fits inside", not "same size":** 167 of the 189 distinct sizes in the history were ordered only once.
-- **Cost of keeping:** ~$7 to measure, tag and rack, plus $0.25/sq ft per month. Scrapped if untouched after 12 months.
-
-Recomputed monthly as a lookup table of short × long side per stock:
-
-| Stock | Orders/yr | Smallest square worth keeping | Low → high estimate |
-|---|---|---|---|
-| 6061 1/8″ | 47 | 35″ | 49″ → 29″ |
-| 6061 1/4″ | 59 | 23″ | 31″ → 21″ |
-| 6061 1/2″ | 54 | 16″ | 21″ → 15″ |
-| 6061 3/4″ | 6 | 19″ | 25″ → 16″ |
-| 6061 1″ | 9 | 15″ | 19″ → 11″ |
-| 7075 1/8″ | 16 | 27″ | 43″ → 23″ |
-| 7075 1/4″ | 14 | 21″ | 23″ → 16″ |
-| 7075 1/2″ | 12 | 17″ | 19″ → 13″ |
-| 7075 3/4″ | 0 | never | never |
-| 7075 1″ | 3 | 12″ | 19″ → 11″ |
-
-- **"Keep anything bigger than the smallest part" keeps far too much.** Smallest part ever ordered: 3 × 8″. Real thresholds are several times that.
-- **Setup drives the threshold.** A 12 × 12″ piece of 1/8″ 6061 holds $7 of metal against $27 to load it; the same piece in 1″ 7075 holds $109. Cheap thin stock needs big offcuts; expensive thick stock can keep small ones.
-- **No demand, no value.** 3/4″ 7075 was never ordered, so nothing in it is kept whatever its size.
-- **Today's bin:** 15 of the 26 drops are worth keeping. The other 11 are too small to be used or too cheap to load.
-
-### 1.4 Handling the uncertainty
-
-- **Plan with the low estimate.** It assumes a drop wins 25% of fitting orders, storage costs $0.50/sq ft/month, and a future setup takes 30 min. Errors are asymmetric: overvaluing fills the rack with junk and can justify buying metal just to create offcuts; undervaluing only scraps a little more.
-- **Decisions are stable.** Thresholds move ~30% between low and high, but their order never changes, and the low estimate buys and loads exactly the same stock in all 8 groups. One layout differs: 1″ 6061 splits its parts 7 and 2 instead of 6 and 3, leaving one 58 × 84″ offcut instead of three.
-- **Thin history borrows.** 1″ 7075 has 3 past orders, 3/4″ 6061 has 6. Their size mix is blended with the shop-wide mix (their own lines count as n, the shop-wide mix as 10); their order *rate* stays their own.
+Every piece of metal on the saw costs about $27, whether it is a $4,363 plate or a scrap off the rack. Yield counts none of that, so it happily loads a leftover to save a few dollars of metal. On this batch it loads 8 leftovers against the final plan's 5.
 
 ---
 
-## 2. Assumptions
+## 3. What a leftover is worth
 
-No questions were needed — every open point has a defensible default, and changing one changes the numbers, not the approach.
+This is the heart of the problem, and it is the number everything else depends on.
 
-| Item | Assumed | Basis |
+```
+leftover value  =  chance it gets used  ×  saving if used  −  cost of keeping it
+
+saving if used  =  metal it replaces  −  $27 to load it  −  trim cuts
+```
+
+- **Chance it gets used.** Count past orders of the same metal that would fit inside it — either orientation, kerf included — and keep only those where using it actually saves money. Assume it wins half of them, since other leftovers and already-open plates compete for the same order. That gives a rate, and from it the chance of use within 12 months.
+- **Cost of keeping it.** About $7 to measure, tag and rack, plus $0.25 per square foot for every month it waits. Unused after 12 months, it is scrapped.
+
+**A worked example.** An 18 × 43″ leftover of 1/4″ 6061. Of the 59 past orders in that metal, **45 would have fit inside it** — so it is near certain to be used. But:
+
+| | |
+|---|---|
+| Chance of use | ~100% |
+| Saving if used | $19.20 (after the $27 load) |
+| Cost of keeping | $7.60 |
+| **Worth** | **$11.60** |
+
+It holds **$79 of metal** and is worth **$12** to keep. The load eats almost all of it.
+
+### What this tells us: most small leftovers are scrap
+
+Running that calculation across every metal gives the smallest square piece worth keeping:
+
+| Metal | Orders last year | Smallest square worth keeping |
 |---|---|---|
-| Machine + labor | $80/hr | README: dozens of $/hr |
-| Setup | 20 min per piece of stock (~$27) | README: tens of minutes |
-| Cut time | 1 min at 1/2″ 6061, scaled by thickness, ×1.5 for 7075 | README |
-| Kerf | 0.125″ | README |
-| Cuts | Two-stage guillotine, 90° rotation allowed | How a plate saw works |
-| Plate size | Full listed size usable | Edge trim costs a fraction of an inch |
-| Drops | Reused for our own orders or scrapped, never sold | README |
-| Keeping a drop | $7 handling, $0.25/sq ft/month, purged at 12 months | Rack space priced as a cost, not a hard cap |
-| Competition | A drop wins half the orders that fit it | Least certain number (§1.4) |
-| Combining orders | All orders on hand are cut together; parts due later are held | README gives `jobs.json` as the batch to nest now |
+| 6061 1/8″ | 47 | 35″ |
+| 7075 1/8″ | 16 | 27″ |
+| 6061 1/4″ | 59 | 23″ |
+| 7075 1/4″ | 14 | 21″ |
+| 6061 3/4″ | 6 | 19″ |
+| 7075 1/2″ | 12 | 17″ |
+| 6061 1/2″ | 54 | 16″ |
+| 6061 1″ | 9 | 15″ |
+| 7075 1″ | 3 | 12″ |
+| 7075 3/4″ | 0 | **never** |
 
-- **All 10 orders are cut together** despite due dates spanning 16 days. Cutting early is low risk: parts wait on a shelf and still ship on time.
-- **A 2-day hold is for live use and is not in the cost numbers.** Holding only pays if a matching order arrives. In the history another order of the same stock followed within 2 days 34% of the time for 1/4″ 6061 and 33% for 1/2″ 6061, 13% for 1/8″, and rarely or never for thick or 7075. Rule: hold only for stock above ~30%, and only when the plan would open a plate less than X% used. X needs the replay (§4) and is untuned.
-- **Three shop realities we do not model,** each of which would tighten the answer: the mill edge on fresh plate probably needs a trim cut; *locating* a specific drop on the rack may cost more than loading it; and 7075 drops carry heat and lot numbers, so traceability may limit which orders can use them.
+Three things follow, and they were not what I expected:
+
+- **"Keep anything bigger than the smallest part" keeps far too much.** The smallest part ever ordered is 3 × 8″. The real thresholds are several times that.
+- **Loading cost decides it, not demand.** A 12 × 12″ piece of 1/8″ 6061 holds $7 of metal against $27 to load it — it can never pay for itself. The same piece in 1″ 7075 holds $109. Cheap thin metal needs big leftovers; expensive thick metal can keep small ones.
+- **No demand, no value.** 3/4″ 7075 is never ordered, so none of it is worth keeping however large the piece.
+
+**Applied to the rack today: 15 of the 26 leftovers are worth keeping.** The other 11 cost more to store and load than they will ever save. That conclusion needs no software at all.
+
+### How uncertain is this?
+
+Very. It rests on a year of history and several assumed rates. Three things keep it usable:
+
+- **Plan with the cautious estimate.** Assume a leftover wins only 25% of fitting orders, storage costs $0.50/sq ft/month, and a future load takes 30 minutes. The errors are not symmetric: overvaluing leftovers fills the rack with junk and can even justify buying metal to create them, while undervaluing only scraps a little more.
+- **The decisions hold anyway.** The thresholds move about 30% between cautious and optimistic, but their *order* never changes — and on this batch the cautious estimate buys and loads exactly the same stock in all eight groups. Only one layout differs.
+- **Borrow when history is thin.** 1″ 7075 has three past orders, 3/4″ 6061 has six. For those, the *shape* of demand is blended with the shop-wide mix; the *rate* stays their own.
 
 ---
 
-## 3. The method
+## 4. How I pick a plan
 
-### 3.1 What a layout is
+### 4.1 The cost rule
+
+```
+plan cost =  plates bought × plate price
+           + pieces of stock loaded × $27
+           + cuts × cut cost
+           + value of leftovers used up
+           − value of leftovers kept
+```
+
+**Only the first three lines are cash.** The last two move value between jobs: a piece is credited when kept, and charged the same amount when a later job uses it. So a leftover is never free metal, and keeping one is never money in the bank. On this batch the credit works out at 30% of the metal inside those pieces, because it already allows for the chance they are never used.
+
+**One real decision.** Thirteen 10 × 10″ parts in 1/2″ 6061:
+
+| Way to cut them | Pay today | Leftovers used | Leftovers kept | **Total** |
+|---|---|---|---|---|
+| Buy a new plate | $990 | $0 | $218 | **$772** |
+| The two biggest leftovers | $76 | $209 | $33 | **$252** |
+| **Three smaller leftovers** | **$104** | **$118** | **$12** | **$210** |
+
+The middle row is **cheapest to cut today**, but it spends the two pieces future orders are most likely to want. The bottom row pays $27 for one more load and saves them — a 22 × 22″ worth $14, and a 10 × 15″ worth nothing that happens to hold exactly one part.
+
+### 4.2 What the saw can actually cut
 
 ```
           ┌───────┬───────┬───────┬──────────────┐
- strip 1  │ part  │ part  │ part  │  remnant     │  strip is as deep as its deepest part
+ strip 1  │ part  │ part  │ part  │  remnant     │  a strip is as deep as its deepest part
           ├───────┴──┬────┴─────┬─┴──┬───────────┤
  strip 2  │ part     │ part     │part│  remnant  │  a shallower part gets one trim cut
           ├──────────┴──────────┴────┴───────────┤
@@ -121,116 +188,143 @@ No questions were needed — every open point has a defensible default, and chan
           └──────────────────────────────────────┘
 ```
 
-- **Two stages** because that is how a plate saw works: first cuts run edge to edge and make strips, second cuts split each strip into parts. Costs a few percent of yield against unrestricted guillotine cuts; three-stage is a later extension.
-- **Strips can run along either side** and any part can turn 90°. Both are tried.
-- **Kerf** is handled by adding the blade width to every dimension.
-- **Each layout is priced** by §1.1: stock cost + setup + cuts − the value of every offcut it leaves. A plate costs its price; a drop costs its own offcut value.
+The saw cuts edge to edge, so a layout is **strips across the plate**, each strip then cut into parts. Strips can run along either side and any part can turn 90°, so the same parts have many possible layouts. Jigsaw-style nesting, where parts interlock, is not available — no straight cut would free a single part.
 
-### 3.2 One method, two passes
+This costs a few percent of packing against unrestricted cuts. Three-stage patterns are a later extension.
 
-1. **Quick pass (greedy).** Take the fullest layout for the parts still unplaced, cut it, repeat. Run three ways: best stock first, plates only, drops first. Always yields complete plans.
-2. **Search (column generation).** The linear relaxation's dual prices say what each part is currently worth; two knapsacks then build the layout that lowers cost most — parts across a strip, then strips along the stock, counting every offcut. Repeat until nothing new helps.
-3. **Choose.** An integer program picks how many times to use each layout: every part cut as ordered, each drop at most once, lowest total cost.
-4. **Output.** A cut list per piece of stock, plus which offcuts to label and rack.
+### 4.3 The method: a quick pass, then a wider search
 
-The quick pass is not a discarded first attempt — its plans stay in the pool, so the search can only improve on them. They are reported separately below so the value of each is visible. Rules like "use drops first" are never hard-coded; they happen when they are cheaper.
+**Step 1 — the quick pass.** Take the fullest layout for the parts not yet placed, cut it, repeat. This is the packing rule from §2, run three ways: best stock first, plates only, leftovers first. It always produces complete plans, and it is fast.
 
-### 3.3 Why not the exact methods
+Its one weakness: it commits to each piece of metal before seeing how the rest will fall.
 
-- **They exist and they are mature.** Arc-flow is state of the art for exactly our two-stage guillotine case (Macedo et al. 2010); branch-and-price on the Gilmore–Gomory model has closed instances of several hundred items (Mrad et al. 2013). Both prove optimality. We generate columns then solve over the ones we have, which does not.
-- **Our objective breaks their structure.** They need a clean linear cost. We add a setup charge per piece loaded, one-of-a-kind drops, and an offcut value that is a *lookup on the leftover's dimensions*. That last term is the obstacle — and it is why the one published model of guillotine cutting *with usable leftovers* ran from seconds to nearly three hours on 11–37 part instances and concluded heuristics are needed (Andrade et al. 2016).
-- **Machine learning is not a candidate.** Hard geometric constraints, and no record of what happened to past drops to learn from. Listed in §5 as something the first version's logs would enable.
+**Step 2 — the search.** Build many more layouts for every plate and leftover, guided by what each part is currently worth to the plan. Price each with the cost rule.
 
-### 3.4 Results on the sample batch
+**Step 3 — choose.** An optimiser picks the cheapest *combination*: every part cut exactly once, each leftover used at most once.
 
-| Objective | Plates | Drops | Cash | Drop value used | Offcut value kept | Plan cost |
-|---|---|---|---|---|---|---|
-| Yield (metal only) | 10 | 8 | $18,720 | $268 | $2,649 | $16,339 |
-| Real costs, offcuts worth $0 | 10 | 4 | $18,605 | $228 | $2,793 | $16,039 |
-| **Proposed** | **10** | **5** | **$18,634** | **$137** | **$2,837** | **$15,934** |
-| Quick pass only, no search | 10 | 7 | $18,709 | $235 | $2,338 | $16,606 |
+The quick pass is not a discarded first attempt — **its plans stay in the pool, so the search can only improve on them.** Rules like "use leftovers first" are never hard-coded; they happen when they are cheaper. For the 1/4″ 6061 order this builds 45 layouts and uses 4, in about three seconds.
 
-- **Counting setup.** 1/8″ 6061: yield loads a 20 × 22″ drop *and* opens a plate ($242); the plan uses the plate alone ($217). 3/4″ 6061: the quick pass loads a 13 × 38″ and an 11 × 24″ drop for five 10 × 10″ parts that fit on plates already being opened — two loads plus $29 of drop value, **$238** wasted.
-- **Which drops.** Nobody buys a $943 plate for the thirteen 10 × 10″ parts in 1/2″ 6061. The plan spends $118 of drop value — a 22 × 22″ ($14), a 29 × 45″ ($104) and a 10 × 15″ ($0) holding exactly one part. Ignoring offcut value takes *both* 29 × 45″ drops ($209): cheaper today, but it spends the pieces future orders most want.
-- **Where the leftovers land.** 1″ 7075, eight 6 × 24″ parts, one plate, same metal and cuts either way: the quick pass mixes orientations and leaves four awkward pieces; after the search every part faces the same way and two clean rectangles worth $870 remain. **$240**, purely from what is left behind.
-- **What the search adds:** $672 over the quick pass, but only **$75** of it cash — nearly all is better offcuts. On 1/4″ 6061 the quick pass already lands on the final plan. Counting setup is worth more than valuing offcuts here ($300 vs $105).
-- **How far from the floor?** Part area over plate area gives a lower limit of **10 plates** with no drops at all, or 8 if every drop could be used perfectly. The plan buys 10. The bound is loose — it ignores that drops are one-of-a-kind and awkwardly shaped — but it caps the remaining prize on metal at two plates, not ten.
-- **Speed:** under 5 seconds per group, all four runs together.
-- **A bug worth recording.** An earlier version could only repeat *whole* rows, so thirteen parts that fit four to a row forced a second plate. Both passes improved when fixed, the quick pass more. Lesson: a comparison between passes is only as trustworthy as the layout code they share.
+*(Technically: two-stage guillotine patterns, column generation with two knapsacks, then an integer program.)*
 
-**If orders could only combine when due within 2 days** (windows Jun 13–15, 20–22, 24, 27–29, offcuts carried forward), everything costs more and the full method comes out **$229 worse than its own quick pass** — in window 1 it splits a 1″ offcut into medium pieces its value table likes, and by window 3 it must buy an extra $2,948 plate. Valuing offcuts one at a time, one window at a time, can be short-sighted. Run: `--window-days 2`.
+### 4.4 Why not the methods that prove the best answer
 
-### 3.5 Where it breaks down
+They exist and they are mature. **Arc-flow** is state of the art for exactly our two-stage guillotine case (Macedo et al. 2010), and **branch-and-price** on the Gilmore–Gomory model has closed instances of several hundred items (Mrad et al. 2013). Both prove optimality; we do not.
 
-- **Many distinct sizes, quantity 1.** The relaxation guides pattern generation poorly. Plans stay complete but quality drops; a local search is the fix.
-- **Two stages only** — a few percent of yield against three-stage or unrestricted guillotine.
-- **One batch at a time.** No look-ahead. The 2-day result above is what that costs.
-- **Offcut values are independent.** Each is valued as if alone and used once, so the model can prefer several medium pieces to one large one (7075 1/2″ keeps three).
-- **No tight bound.** The area floor above is loose, and the prototype's pricing does not prove optimality. Exact pricing would close that.
-- **Scale:** groups run in parallel; knapsacks grow with part *types* and plate size, not piece count; each drop adds a small pricing problem, so a rack of hundreds needs pre-filtering to drops that can hold at least one part.
+**Our objective breaks them.** They need a clean linear cost. We add a setup charge per piece loaded, leftovers that are one of a kind, and a leftover value that is a *lookup on the piece's dimensions*. That last term is the obstacle — and it is why the one published model of guillotine cutting *with usable leftovers* ran from seconds to nearly three hours on instances of 11 to 37 parts, and concluded that heuristics are needed (Andrade et al. 2016).
+
+Machine learning is not a candidate either: hard geometric constraints, and no record of what happened to past leftovers to learn from.
+
+### 4.5 Where this breaks down
+
+- **Many distinct sizes, quantity one.** The search guides itself less well. Plans stay complete but quality drops; a local search would fix it.
+- **One batch at a time.** No look-ahead to future orders. §5 shows what that costs.
+- **Leftovers are valued one at a time,** as if each were alone and used once. So the model can prefer several medium pieces to one large one.
+- **No tight bound.** Part area over plate area says at least 10 plates are needed with no leftovers at all, or 8 if every leftover could be used perfectly. The plan buys 10 — so the remaining prize on metal is at most two plates. That is a loose floor; exact pricing would tighten it.
+- **Scale.** Groups run in parallel. The search grows with the number of part *types* and the plate size, not the piece count. Each leftover adds a small sub-problem, so a rack of hundreds needs pre-filtering.
 
 ---
 
-## 4. Evaluation
+## 5. What it does on the data
 
-**The year replay is implemented.** `prototype/replay.py` runs all 220 order lines over 166 days in about a minute. Each order appears on the day it was placed, so the planner never sees the future. The rack starts **empty**, so every drop used was created earlier in the same year by the same method.
+### On this batch
 
-| Method | Plates | Cash | Of metal bought: parts / rack / scrap |
+| Objective | Plates | Leftovers loaded | Cash | **Total cost** |
+|---|---|---|---|---|
+| Waste least metal (yield) | 10 | 8 | $18,720 | **$16,339** |
+| Real costs, leftovers worth $0 | 10 | 4 | $18,605 | **$16,039** |
+| **Full method** | **10** | **5** | **$18,634** | **$15,934** |
+| Quick pass only, no search | 10 | 7 | $18,709 | **$16,606** |
+
+**Three things the cost rule catches:**
+
+- **Loads that never pay.** For 3/4″ 6061 the quick pass pulls a 13 × 38″ and an 11 × 24″ leftover off the rack for five 10 × 10″ parts that fit on plates already being opened — two loads plus $29 of leftover value, **$238** it did not need to spend.
+- **Which leftovers to spend.** Nobody buys a $943 plate for the thirteen 10 × 10″ parts. But ignoring leftover value takes *both* 29 × 45″ pieces — cheaper today, and it spends exactly what future orders want most.
+- **Where the leftovers land.** 1″ 7075, eight 6 × 24″ parts, one plate, same metal and same cutting either way. The quick pass mixes orientations and leaves four awkward pieces; after the search every part faces the same way and two clean rectangles worth $870 remain. **$240, purely from what is left behind.**
+
+**Honestly, on one batch the search is marginal:** $672 better than the quick pass, but only **$75** of that is cash. On 1/4″ 6061 the quick pass already lands on the same plan. Counting the loading cost is worth more here than valuing leftovers ($300 against $105).
+
+### Where the metal went
+
+Across all 15 pieces of metal the plan cuts: **53% became parts, 40% went back on the rack as leftovers worth keeping, 7% was scrap** including saw cuts. Five of those 15 pieces were leftovers rather than new plates, and the 1/2″ 6061 order needed no new plate at all.
+
+Many plates are barely touched, because the order only needed a little of that metal. That is exactly why what is left behind matters.
+
+### A year of orders, replayed
+
+One batch hides the effect, because the rack barely turns over. So I replayed the whole year — 220 order lines over 166 days, each order appearing on the day it was placed, the rack starting **empty**:
+
+| Method | Plates bought | Cash | Parts / on rack / scrap |
 |---|---|---|---|
-| **Proposed** | **158** | **$144,230** | 72.8% / 14.3% / **12.9%** |
-| Real costs, offcuts worth $0 | 160 | $146,487 | 72.0% / 14.6% / 13.5% |
+| **Full method** | **158** | **$144,230** | 72.8% / 14.3% / **12.9%** |
+| Real costs, leftovers worth $0 | 160 | $146,487 | 72.0% / 14.6% / 13.5% |
 | Quick pass only, no search | 161 | $146,710 | 71.5% / 13.1% / **15.4%** |
 
-**Is it worth building?** $2,480 a year is **1.7% of metal spend** — thin against a few weeks of engineering, and worth saying out loud. Three things make the case anyway:
+Over a year it buys **three fewer plates**, scraps **2.5 points less** of the metal it buys, and spends about **$2,500 less cash**. Roughly ten times the gap on a single batch.
 
-- The sample data is illustrative; what transfers to real volume is the **percentage**, not the dollars.
-- **Scrap falls 2.5 points**, which is the number a shop feels, and it compounds as the rack fills.
-- **The cheapest win is not the search at all.** It is the §1.3 threshold table: stop racking 11 of the 26 drops on hand. That needs no optimizer, just the lookup.
+**Is that worth building?** $2,480 a year is **1.7% of metal spend** — thin against a few weeks of engineering, and worth saying out loud. Three things make the case anyway:
 
-**What the replay does not yet cover:**
-- **On-time delivery** — the history has no due dates, so nothing is held and lateness cannot be measured. Tuning the 2-day hold needs dates the sample lacks.
-- **A steady state** — the year ends with 14% of metal bought still on the rack. A second year would show whether the rack settles or grows, which is the real test of a keep-more policy.
-- **Drop age** — tracked but not reported. An offcut untouched for 12 months is a cost, not a saving.
+- The sample data is illustrative. What transfers to real volume is the **percentage**, not the dollars.
+- **Scrap falling 2.5 points** is the number a shop feels, and it compounds as the rack fills.
+- **The cheapest win is not the optimiser at all.** It is the threshold table in §3: stop racking 11 of the 26 leftovers on hand. That needs no software.
 
-**Also needed:**
-- **Offcut values, out of time.** Fit on months 1–6, then check months 7–12 in bands: if pieces predicted at 60% are used ~60% of the time, the values are calibrated.
-- **Plan quality.** Exhaustive search on small groups; longer runs and three-stage patterns on large ones.
-- **Why order history, not past drop records.** Customers order the same parts whichever method cuts them. Past drops reflect the method that made them, so a test built on them favours that method.
-- **In production:** shadow mode first — the planner recommends, operators cut as usual, every override logged with a reason. Overrides are the best source of missing constraints.
+**One honest failure.** If orders could only be combined when due within two days, the full method comes out **$229 worse than its own quick pass** — in the first window it splits a 1″ leftover into medium pieces its value table likes, and by the third it must buy an extra $2,948 plate. Valuing leftovers one at a time, one window at a time, can be short-sighted.
 
 ---
 
-## 5. First version and ambitious version
+## 6. How I would know it is working
 
-**First version — a few weeks, small team:**
-- The §3 planner: two-stage patterns, quick pass plus column generation, off-the-shelf solver.
-- A monthly offcut-value table per stock, on the low estimate.
-- All orders on hand nested together; a 2-day hold for 1/4″ and 1/2″ 6061 only, threshold set by replay.
-- Operators see each plan with its cost breakdown and can override with a reason.
-- **A log of every drop:** created, used, scrapped. This is what makes everything below possible.
-- *Deliberately excluded:* planning across days, three-stage patterns, simulated offcut values, learned models, a hard rack cap.
+**The year replay above is the main test, and it is implemented.** All methods see the same order stream, obey the same saw rules and are scored the same way. Success means lower cost per part without the rack growing without limit.
 
-Why first: smallest change that captures setup, drop choice and offcut shape; easy to measure; and it produces the data the next version needs.
+**Why order history and not past leftover records.** Customers order the same parts whichever method cuts them, so order history is a fair yardstick. Past leftovers reflect the method that made them, so a test built on them would favour that method.
 
-**Ambitious version:**
-- **Cut now or wait, per order,** from the chance a matching order arrives in time.
-- **Offcut value by simulation** over forecast demand, including repeated reuse and rack fullness — fixes the independence bias above.
-- **Learned models:** reuse probability (survival model) and cut/setup times from machine logs.
-- **Three-stage patterns and exact bounds.**
-- **Manage the rack as inventory:** storage cost rises as it fills; purge drops whose value has fallen below their storage cost.
-- **Feed true cost back into quoting** — for example discount an ordered size that fits an existing drop.
+**What the replay does not cover yet:**
 
-**The gap is data, not algorithms.** The ambitious version needs drop records and machine timings that do not exist yet. The first version saves money now and starts collecting them.
+- **On-time delivery.** The history has no due dates, so nothing is held and lateness cannot be measured. Tuning the 2-day hold needs dates the sample does not have.
+- **A steady state.** The year ends with 14% of the metal bought still on the rack. A second year would show whether the rack settles at a size or keeps growing — the real test of a policy that deliberately keeps material.
+- **Leftover age.** Tracked but not reported. A piece untouched for twelve months is a cost, not a saving.
+
+**Checking the leftover values themselves.** Fit them on months 1–6, then check months 7–12 in bands: if pieces predicted at 60% are used about 60% of the time, the values are calibrated. **If history were thinner**, borrow the shop-wide size mix (already done for 1″ 7075 and 3/4″ 6061), pool neighbouring thicknesses for the shape of demand but not its rate, and stay on the cautious estimate until enough history builds up.
+
+**In production**, run in shadow mode first: the planner recommends, operators cut as usual, and every override is logged with a reason. Overrides are the best source of constraints we have not modelled.
 
 ---
 
-## 6. Prototype
+## 7. What I would ship first, and what I would build with a bigger budget
 
-- `drop_value.py` (stdlib only) — offcut values from order history; prints keep thresholds and a keep/scrap call for every drop on hand. `python prototype/drop_value.py`
-- `nest.py` (numpy, scipy) — the §3 planner on `jobs.json` under all four runs, with cut lists. `python prototype/nest.py`, plus `--low` or `--window-days 2`.
-- `replay.py` — the full year from an empty rack.
+### First version — a few weeks, small team
 
-*This went past the brief's "keep it tiny".* It grew because the claims in §3.4 and §4 are comparisons, and a comparison between methods is worth nothing unless both run on the same code. The reasoning stands without it; the numbers do not.
+- The planner from §4, on an off-the-shelf solver.
+- A leftover-value table per metal, refreshed monthly, on the cautious estimate.
+- All orders on hand nested together; the 2-day hold for 1/4″ and 1/2″ 6061 only.
+- Operators see each plan with its cost breakdown and can override it with a reason.
+- **A log of every leftover:** created, used, scrapped. This is what makes everything below possible.
+- *Deliberately left out:* planning across days, three-stage patterns, simulated leftover values, learned models, a hard cap on rack space.
+
+Why this first: it is the smallest change that captures the three effects that matter — loading cost, which leftover to spend, and the shape of what is left behind — it is easy to measure against today, and it produces the data the next version needs.
+
+### With a bigger budget
+
+**The biggest remaining cost is loading and unloading,** and it is also what makes small leftovers not worth using:
+
+- **Automate loading.** Mobile robots fetch the right piece from the rack; a robot arm loads the saw. If setup drops from 20 minutes to 5, the smallest leftover worth keeping shrinks by a third or more — 1/2″ 6061 goes from 16″ to 10″ — so far more leftovers get reused.
+- **A cutter that is not limited to straight cuts.** A waterjet or laser can follow any path, so parts nest tighter and leftovers come out bigger. Waterjet suits thick aluminium better than laser; worth testing on real parts.
+- **Decide per order whether to cut now or wait,** from the measured chance a matching order arrives in time.
+- **Value leftovers by simulation** over forecast demand, including repeated reuse and how full the rack is. This fixes the one-at-a-time bias in §4.5.
+- **Learned models** for reuse probability and for real cut and setup times, trained on the first version's logs.
+- **Manage the rack as inventory:** storage cost rises as it fills, and pieces whose value has fallen below their storage cost get cleared out.
+- **Feed true cost back into quoting** — for example, discount an ordered size that happens to fit a leftover already on the rack.
+
+**The gap between the two is data, not algorithms.** The ambitious version needs leftover records and machine timings that do not exist yet. The first version saves money now and starts collecting them.
+
+---
+
+## Prototype
+
+- `prototype/drop_value.py` — leftover values from order history; prints the keep/scrap threshold per metal and a verdict on every leftover on the rack. Standard library only.
+- `prototype/nest.py` — the planner on `jobs.json` under all four objectives, with full cut lists. Add `--low` for the cautious estimate, or `--window-days 2` for the two-day what-if. Needs numpy and scipy.
+- `prototype/replay.py` — the full year from an empty rack.
+
+*This went past the brief's "keep it tiny".* It grew because the claims in §5 are comparisons, and a comparison between methods is worth nothing unless both run on the same code. The reasoning stands without it; the numbers do not.
 
 ## References
 
