@@ -11,8 +11,9 @@ Deciding which stock each ordered part is cut from, where it sits and which way 
 | **[DESIGN.md](DESIGN.md)** | The design document — the submission. Objective, assumptions, method, evaluation, first vs ambitious version. |
 | **[Cut, Keep, or Scrap.pdf](Cut,%20Keep,%20or%20Scrap.pdf)** | Slides telling the same story with diagrams. The quickest way in. |
 | `prototype/` | Three scripts, run against the provided data. |
-| `data/` | The provided sample data, unchanged. |
 | [BRIEF.md](BRIEF.md) | The original problem statement. |
+
+The `data/` folder is deliberately not in this repo. Drop the provided `jobs.json`, `inventory.json` and `order_history.json` into `data/` and the scripts run as-is.
 
 ## Running the prototype
 
